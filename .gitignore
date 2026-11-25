@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+artifacts/
+out/
+dist/
+TestResults/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Local working folders (not part of the project)
+/backup/
+/spike/
+/icons/

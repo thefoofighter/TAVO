@@ -1,0 +1,75 @@
+name: Release
+
+# Push a tag such as v0.1.0 to build, test and publish a GitHub release.
+# Release notes come from the matching section in CHANGELOG.md.
+# Force-pushing an existing tag rebuilds and replaces its release.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Test
+        run: dotnet test TAVO.sln -c Release
+
+      - name: Publish and package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '${{ github.ref_name }}'.TrimStart('v')
+          "VERSION=$ver" | Out-File $env:GITHUB_ENV -Append
+          $common = @('src/TAVO/TAVO.csproj', '-c', 'Release', '-r', 'win-x64', '-p:PublishSingleFile=true', '-p:DebugType=none', "-p:Version=$ver")
+          dotnet publish @common --self-contained true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o out/sc
+          dotnet publish @common --self-contained false -o out/fd
+          New-Item -ItemType Directory dist | Out-Null
+          $packages = @(
+            @{ Dir = 'out/sc'; Zip = "dist/TAVO-$ver-win-x64.zip" },
+            @{ Dir = 'out/fd'; Zip = "dist/TAVO-$ver-win-x64-framework-dependent.zip" }
+          )
+          foreach ($p in $packages) {
+            Copy-Item README.md, LICENSE, CHANGELOG.md $p.Dir
+            Compress-Archive -Path "$($p.Dir)/*" -DestinationPath $p.Zip
+          }
+          Get-ChildItem dist/*.zip | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
+            Set-Content dist/SHA256SUMS.txt
+
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $m = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($ver))\][^\n]*\n(.*?)(?=^## \[|^\[[^\]]+\]:|\z)")
+          if (-not $m.Success) { throw "CHANGELOG.md has no section for $ver" }
+          $notes = $m.Groups[1].Value.Trim()
+          $notes += @"
+
+
+          ## Download
+
+          | File | Use it when |
+          |------|-------------|
+          | ``TAVO-$ver-win-x64.zip`` | You want one file that runs as is (includes .NET). |
+          | ``TAVO-$ver-win-x64-framework-dependent.zip`` | You have the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) installed. |
+
+          Extract ``TAVO.exe`` to a folder you keep, start it, then select **Refresh explorer** in the tray menu. The exe is not code-signed, so SmartScreen can ask for confirmation. ``SHA256SUMS.txt`` has the checksums.
+          "@
+          Set-Content release-notes.md $notes
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A re-pushed tag replaces its release (the tag itself stays).
+          gh release view "${{ github.ref_name }}" *> $null
+          if ($LASTEXITCODE -eq 0) { gh release delete "${{ github.ref_name }}" --yes }
+          gh release create "${{ github.ref_name }}" (Get-ChildItem dist).FullName --title "TAVO ${{ env.VERSION }}" --notes-file release-notes.md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
